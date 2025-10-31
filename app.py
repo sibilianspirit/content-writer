@@ -27,28 +27,56 @@ else:
 def fetch_webpage_content(url: str) -> str:
     """
     Pobiera zawartość strony internetowej i zwraca czysty tekst.
+    Używa różnych metod w przypadku blokady.
     """
+    # Próba 1: Standardowy request z rozszerzonymi nagłówkami
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'DNT': '1',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Cache-Control': 'max-age=0',
+    }
+    
     try:
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=15, allow_redirects=True)
         response.raise_for_status()
         
         soup = BeautifulSoup(response.content, 'html.parser')
         
         # Usuń skrypty, style i inne niepotrzebne elementy
-        for script in soup(["script", "style", "nav", "footer", "header"]):
+        for script in soup(["script", "style", "nav", "footer", "header", "aside", "iframe"]):
             script.decompose()
         
         # Pobierz tekst
         text = soup.get_text(separator='\n', strip=True)
+        
+        # Usuń puste linie i zbędne białe znaki
+        lines = [line.strip() for line in text.split('\n') if line.strip()]
+        text = '\n'.join(lines)
         
         # Ogranicz długość (max ~8000 znaków dla API)
         if len(text) > 8000:
             text = text[:8000] + "..."
         
         return text
+        
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 403:
+            st.warning(f"⚠️ Strona {url} blokuje automatyczne pobieranie. Użyj trybu ręcznego lub spróbuj skopiować treść strony.")
+            return None
+        else:
+            st.error(f"Błąd HTTP {e.response.status_code} dla {url}")
+            return None
+    except requests.exceptions.Timeout:
+        st.error(f"⏱️ Przekroczono limit czasu dla: {url}")
+        return None
     except Exception as e:
         st.error(f"Błąd pobierania strony {url}: {str(e)}")
         return None
@@ -289,15 +317,55 @@ with st.sidebar:
             label_visibility="collapsed"
         )
         
-        if st.button("🔍 Analizuj strony", type="primary", use_container_width=True):
-            urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
-            if urls:
-                st.session_state.products = extract_data_from_urls(urls)
-                if st.session_state.products:
-                    st.success(f"✅ Przeanalizowano {len(st.session_state.products)} produktów!")
-                    st.rerun()
-            else:
-                st.warning("Proszę wkleić przynajmniej jeden URL.")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            if st.button("🔍 Analizuj strony", type="primary", use_container_width=True):
+                urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
+                if urls:
+                    st.session_state.products = extract_data_from_urls(urls)
+                    if st.session_state.products:
+                        st.success(f"✅ Przeanalizowano {len(st.session_state.products)} produktów!")
+                        st.rerun()
+                else:
+                    st.warning("Proszę wkleić przynajmniej jeden URL.")
+        
+        with col2:
+            if st.button("📋 Wklej treść ręcznie", use_container_width=True):
+                st.session_state.manual_paste_mode = True
+        
+        # Tryb ręcznego wklejania treści
+        if st.session_state.get('manual_paste_mode', False):
+            st.markdown("---")
+            st.markdown("**Tryb ręcznego wklejania treści:**")
+            st.info("💡 Jeśli strona blokuje automatyczne pobieranie, skopiuj jej treść ręcznie i wklej poniżej.")
+            
+            with st.form("manual_paste_form"):
+                page_url = st.text_input("URL strony produktu:")
+                page_content = st.text_area(
+                    "Treść strony (skopiuj tekst ze strony):",
+                    height=200,
+                    placeholder="Wklej skopiowaną treść strony produktu..."
+                )
+                
+                col1, col2 = st.columns(2)
+                with col1:
+                    if st.form_submit_button("✅ Analizuj wklejoną treść", use_container_width=True):
+                        if page_content and page_url:
+                            with st.spinner("Analizuję treść..."):
+                                product_data = extract_product_data_with_llm(page_url, page_content)
+                                if product_data:
+                                    st.session_state.products.append(product_data)
+                                    st.success(f"✅ Dodano: {product_data['nazwa']}")
+                                    st.session_state.manual_paste_mode = False
+                                    st.rerun()
+                        else:
+                            st.error("Wypełnij oba pola!")
+                
+                with col2:
+                    if st.form_submit_button("❌ Anuluj", use_container_width=True):
+                        st.session_state.manual_paste_mode = False
+                        st.rerun()
     
     else:  # Ręczne dodanie
         with st.form("manual_form", clear_on_submit=True):
