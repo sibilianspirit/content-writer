@@ -2,13 +2,17 @@ import streamlit as st
 import pandas as pd
 import json
 from copy import deepcopy
-from openai import OpenAI # <--- NOWA LINIA
+from openai import OpenAI
+import requests
+from bs4 import BeautifulSoup
 
 # --- Inicjalizacja stanu sesji ---
 if 'products' not in st.session_state:
     st.session_state.products = []
 if 'manual_ranking_order' not in st.session_state:
     st.session_state.manual_ranking_order = []
+if 'processing_status' not in st.session_state:
+    st.session_state.processing_status = []
 
 # --- Konfiguracja API OpenAI ---
 api_key_provided = "OPENAI_API_KEY" in st.secrets
@@ -20,62 +24,233 @@ else:
 
 # --- Funkcje pomocnicze ---
 
+def fetch_webpage_content(url: str) -> str:
+    """
+    Pobiera zawartość strony internetowej i zwraca czysty tekst.
+    """
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Usuń skrypty, style i inne niepotrzebne elementy
+        for script in soup(["script", "style", "nav", "footer", "header"]):
+            script.decompose()
+        
+        # Pobierz tekst
+        text = soup.get_text(separator='\n', strip=True)
+        
+        # Ogranicz długość (max ~8000 znaków dla API)
+        if len(text) > 8000:
+            text = text[:8000] + "..."
+        
+        return text
+    except Exception as e:
+        st.error(f"Błąd pobierania strony {url}: {str(e)}")
+        return None
+
+def extract_product_data_with_llm(url: str, content: str) -> dict:
+    """
+    Używa LLM do ekstrakcji danych produktu z zawartości strony.
+    """
+    if not client:
+        st.error("Klucz OpenAI API nie został skonfigurowany.")
+        return None
+    
+    extraction_prompt = f"""Przeanalizuj poniższą zawartość strony internetowej i wyciągnij z niej informacje o produkcie lub usłudze.
+
+URL: {url}
+
+ZAWARTOŚĆ STRONY:
+{content}
+
+Twoim zadaniem jest zwrócić TYLKO poprawny JSON (bez żadnego dodatkowego tekstu) w następującym formacie:
+{{
+    "nazwa": "Pełna nazwa produktu/usługi",
+    "cena": "Cena w formacie tekstowym (np. '4999 PLN' lub 'od 29.99 USD')",
+    "cechy": [
+        "Kluczowa cecha 1",
+        "Kluczowa cecha 2",
+        "Kluczowa cecha 3",
+        "Kluczowa cecha 4",
+        "Kluczowa cecha 5"
+    ],
+    "ocena": 8.5,
+    "opinie_uzytkownikow": [
+        "Podsumowanie opinii pozytywnych",
+        "Podsumowanie opinii negatywnych"
+    ],
+    "link": "{url}"
+}}
+
+WAŻNE:
+- Jeśli nie znajdziesz ceny, wpisz "Brak informacji o cenie"
+- Jeśli nie znajdziesz oceny, wpisz 0
+- Wyciągnij 5-10 najważniejszych cech technicznych lub funkcjonalnych
+- Jeśli są opinie użytkowników, podsumuj je w 1-2 punktach (pozytywne i negatywne osobno)
+- Zwróć TYLKO JSON, bez żadnego komentarza przed lub po nim"""
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",  # Tańszy model do ekstrakcji
+            messages=[
+                {"role": "system", "content": "Jesteś specjalistą od ekstrakcji danych produktowych. Zwracasz TYLKO poprawny JSON bez dodatkowych komentarzy."},
+                {"role": "user", "content": extraction_prompt}
+            ],
+            temperature=0.3
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        
+        # Usuń markdown jeśli występuje
+        if result_text.startswith("```json"):
+            result_text = result_text[7:]
+        if result_text.startswith("```"):
+            result_text = result_text[3:]
+        if result_text.endswith("```"):
+            result_text = result_text[:-3]
+        
+        product_data = json.loads(result_text.strip())
+        return product_data
+        
+    except json.JSONDecodeError as e:
+        st.error(f"Błąd parsowania JSON: {str(e)}\nOtrzymana odpowiedź: {result_text[:200]}")
+        return None
+    except Exception as e:
+        st.error(f"Błąd podczas ekstrakcji danych: {str(e)}")
+        return None
+
 def extract_data_from_urls(urls: list[str]):
     """
-    Placeholder dla funkcji, która pobiera dane z URL-i.
-    W rzeczywistej aplikacji tutaj nastąpiłoby wywołanie narzędzia browse,
-    a następnie wysłanie treści do LLM w celu ekstrakcji danych do formatu JSON.
+    Pobiera dane z URL-i używając web scrapingu i LLM.
     """
-    st.info(f"Rozpoczynam analizę {len(urls)} adresów URL...")
+    products = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
     
-    mock_data = [
-        {
-            "nazwa": "Laptop XYZ Pro", "cena": "8999 PLN",
-            "cechy": ["Procesor: UltraChip X1", "RAM: 32 GB DDR5", "Ekran: 14 cali, 4K OLED"],
-            "ocena": 9.5, "link": urls[0] if urls else ""
-        },
-        {
-            "nazwa": "Laptop ABC Air", "cena": "6499 PLN",
-            "cechy": ["Procesor: EcoChip Z2", "RAM: 16 GB DDR5", "Waga: 0.9 kg"],
-            "ocena": 9.1, "link": urls[1] if len(urls) > 1 else ""
-        },
-        {
-            "nazwa": "Gamingowy Potwór G1", "cena": "14999 PLN",
-            "cechy": ["Procesor: Core i9 Extreme", "RAM: 64 GB DDR5", "Grafika: RTX 9090"],
-            "ocena": 9.8, "link": urls[2] if len(urls) > 2 else ""
-        }
-    ]
-    return mock_data[:len(urls)]
+    for i, url in enumerate(urls):
+        status_text.text(f"Przetwarzam {i+1}/{len(urls)}: {url}")
+        
+        # Pobierz zawartość strony
+        content = fetch_webpage_content(url)
+        
+        if content:
+            # Wyciągnij dane produktu za pomocą LLM
+            product_data = extract_product_data_with_llm(url, content)
+            
+            if product_data:
+                products.append(product_data)
+                st.success(f"✓ Pomyślnie przeanalizowano: {product_data.get('nazwa', 'Nieznany produkt')}")
+            else:
+                st.warning(f"⚠ Nie udało się wyciągnąć danych z: {url}")
+        else:
+            st.error(f"✗ Nie udało się pobrać strony: {url}")
+        
+        progress_bar.progress((i + 1) / len(urls))
+    
+    status_text.empty()
+    progress_bar.empty()
+    
+    return products
 
-def generate_llm_response(prompt: str):
+def generate_comparison_prompt(products_data: list):
+    """
+    Generuje prompt dla porównania produktów.
+    """
+    prompt = f"""Jesteś ekspertem tworzącym szczegółowe porównania produktów. 
+
+Oto produkty do porównania:
+{json.dumps(products_data, indent=2, ensure_ascii=False)}
+
+Stwórz profesjonalne porównanie, które zawiera:
+1. Wprowadzenie - krótkie przedstawienie porównywanych produktów
+2. Tabela porównawcza kluczowych specyfikacji
+3. Szczegółowa analiza w kategoriach:
+   - Cena i stosunek jakości do ceny
+   - Najważniejsze cechy i funkcjonalności
+   - Wydajność/jakość (na podstawie dostępnych danych)
+   - Opinie użytkowników (jeśli dostępne)
+4. Podsumowanie - dla kogo jest każdy produkt
+
+Użyj formatowania Markdown dla lepszej czytelności."""
+    
+    return prompt
+
+def generate_ranking_prompt(products_data: list, criterion: str, top_n: int):
+    """
+    Generuje prompt dla automatycznego rankingu.
+    """
+    prompt = f"""Jesteś redaktorem tworzącym profesjonalne rankingi produktów.
+
+Kryterium rankingu: {criterion}
+
+Produkty do przeanalizowania:
+{json.dumps(products_data, indent=2, ensure_ascii=False)}
+
+Twoim zadaniem jest:
+1. Przeanalizować wszystkie produkty pod kątem kryterium: "{criterion}"
+2. Ocenić każdy produkt biorąc pod uwagę: cechy, cenę, oceny, opinie użytkowników
+3. Stworzyć ranking Top {top_n}
+4. Dla każdej pozycji napisać szczegółowe uzasadnienie (3-4 zdania)
+
+Format odpowiedzi:
+# Top {top_n}: {criterion}
+
+## 🥇 Miejsce 1: [Nazwa produktu]
+**Cena:** [cena]
+**Dlaczego na podium:** [szczegółowe uzasadnienie]
+**Kluczowe zalety:**
+- [zaleta 1]
+- [zaleta 2]
+
+[Powtórz dla pozostałych miejsc]
+
+## Podsumowanie
+[Krótkie podsumowanie rankingu]"""
+    
+    return prompt
+
+def generate_llm_response(prompt: str, show_prompt: bool = True):
     """
     Wysyła prompt do API OpenAI i wyświetla odpowiedź.
     """
-    st.subheader("Wygenerowany Prompt dla LLM:")
-    st.text_area("Prompt", value=prompt, height=300)
+    if show_prompt:
+        with st.expander("📋 Zobacz wygenerowany prompt", expanded=False):
+            st.text_area("Prompt wysłany do LLM", value=prompt, height=300)
     
-    # Sprawdzenie, czy klucz API jest dostępny
     if not client:
-        st.error("Klucz OpenAI API nie został skonfigurowany. Dodaj go w ustawieniach aplikacji w Streamlit Cloud.")
+        st.error("Klucz OpenAI API nie został skonfigurowany.")
         return
 
     try:
-        with st.spinner("🤖 Model myśli... Proszę czekać..."):
-            # Wywołanie API OpenAI
+        with st.spinner("🤖 Model analizuje dane i tworzy treść..."):
             response = client.chat.completions.create(
-                model="gpt-4o",  # Możesz zmienić model, np. na "gpt-3.5-turbo"
+                model="gpt-4o",
                 messages=[
-                    {"role": "system", "content": "Jesteś pomocnym asystentem, który tworzy angażujące treści marketingowe po polsku."},
+                    {"role": "system", "content": "Jesteś ekspertem od tworzenia profesjonalnych treści marketingowych i technicznych w języku polskim. Piszesz przejrzyście, angażująco i merytorycznie."},
                     {"role": "user", "content": prompt}
-                ]
+                ],
+                temperature=0.7
             )
-            # Wyświetlenie odpowiedzi
-            st.subheader("Odpowiedź od GPT:")
+            
+            st.markdown("---")
+            st.subheader("📝 Wygenerowana Treść:")
             st.markdown(response.choices[0].message.content)
+            
+            # Opcja kopiowania
+            st.download_button(
+                label="💾 Pobierz jako TXT",
+                data=response.choices[0].message.content,
+                file_name="wygenerowana_tresc.txt",
+                mime="text/plain"
+            )
 
     except Exception as e:
         st.error(f"Wystąpił błąd podczas komunikacji z API OpenAI: {e}")
-
 
 def move_item_in_list(list_to_modify, item_to_move, direction):
     """Przesuwa element na liście w górę lub w dół."""
@@ -88,132 +263,235 @@ def move_item_in_list(list_to_modify, item_to_move, direction):
     except (ValueError, IndexError):
         st.error("Wystąpił błąd podczas przesuwania elementu.")
 
-# --- Interfejs Użytkownika (UI) ---
-# (Reszta kodu pozostaje bez zmian)
+# --- INTERFACE UŻYTKOWNIKA ---
 
-st.set_page_config(layout="wide")
-st.title("🤖 Generator Treści AI")
+st.set_page_config(page_title="Generator Treści AI", layout="wide", page_icon="🤖")
 
-# --- PANEL BOCZNY (SIDEBAR) ---
-st.sidebar.header("Krok 1: Wprowadź Dane")
-data_source = st.sidebar.radio("Wybierz źródło danych:", ("Adresy URL", "Wprowadź ręcznie"))
-
-if data_source == "Adresy URL":
-    urls_text = st.sidebar.text_area("Wklej adresy URL (jeden na linię):", height=150, help="Symulacja: Wklej 1, 2 lub 3 linki, aby zobaczyć przykładowe dane.")
-    if st.sidebar.button("Pobierz i przeanalizuj dane"):
-        urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
-        if urls:
-            with st.spinner("Przetwarzanie... (To jest symulacja)"):
-                st.session_state.products = extract_data_from_urls(urls)
-            st.sidebar.success(f"Pomyślnie przetworzono {len(st.session_state.products)} produkty!")
-        else:
-            st.sidebar.warning("Proszę wkleić przynajmniej jeden adres URL.")
-
-elif data_source == "Wprowadź ręcznie":
-    with st.sidebar.form("manual_add_form", clear_on_submit=True):
-        st.subheader("Dodaj produkt/usługę")
-        name = st.text_input("Nazwa produktu")
-        price = st.text_input("Cena")
-        features = st.text_area("Cechy (każda w nowej linii)")
-        rating = st.slider("Ocena (1-10)", 1.0, 10.0, 5.0, 0.1)
-        
-        submitted = st.form_submit_button("Dodaj produkt do listy")
-        if submitted and name:
-            product_data = {
-                "nazwa": name,
-                "cena": price,
-                "cechy": [f.strip() for f in features.split('\n') if f.strip()],
-                "ocena": rating
-            }
-            st.session_state.products.append(product_data)
-            st.sidebar.success(f"Dodano '{name}'!")
-
-# Wyświetlanie listy wczytanych produktów
-st.sidebar.header("Wczytane Produkty")
-if st.session_state.products:
-    for i, p in enumerate(st.session_state.products):
-        st.sidebar.markdown(f"- **{p['nazwa']}** (Ocena: {p.get('ocena', 'N/A')})")
-    if st.sidebar.button("Wyczyść listę produktów"):
-        st.session_state.products = []
-        st.rerun()
-else:
-    st.sidebar.info("Brak wczytanych produktów.")
-
-# --- GŁÓWNY OBSZAR APLIKACJI ---
+st.title("🤖 Generator Treści AI - Rankingi i Porównania")
+st.markdown("*Automatyczna analiza produktów i generowanie profesjonalnych treści*")
 
 if not api_key_provided:
-    st.warning("Uwaga: Klucz OpenAI API nie został znaleziony. Generowanie treści nie będzie działać. Proszę skonfiguruj go w ustawieniach aplikacji.", icon="⚠️")
+    st.error("⚠️ UWAGA: Klucz OpenAI API nie został znaleziony. Skonfiguruj go w Streamlit Cloud Secrets.", icon="🔑")
+    st.stop()
+
+# --- PANEL BOCZNY ---
+with st.sidebar:
+    st.header("📊 Krok 1: Dane Produktów")
+    
+    data_source = st.radio("Wybierz źródło:", ("🔗 Linki URL", "✍️ Ręczne dodanie"))
+
+    if data_source == "🔗 Linki URL":
+        st.markdown("Wklej linki do stron produktów (jeden na linię):")
+        urls_text = st.text_area(
+            "Adresy URL",
+            height=150,
+            placeholder="https://example.com/produkt1\nhttps://example.com/produkt2",
+            label_visibility="collapsed"
+        )
+        
+        if st.button("🔍 Analizuj strony", type="primary", use_container_width=True):
+            urls = [url.strip() for url in urls_text.split('\n') if url.strip()]
+            if urls:
+                st.session_state.products = extract_data_from_urls(urls)
+                if st.session_state.products:
+                    st.success(f"✅ Przeanalizowano {len(st.session_state.products)} produktów!")
+                    st.rerun()
+            else:
+                st.warning("Proszę wkleić przynajmniej jeden URL.")
+    
+    else:  # Ręczne dodanie
+        with st.form("manual_form", clear_on_submit=True):
+            st.subheader("Dodaj produkt ręcznie")
+            name = st.text_input("Nazwa produktu*")
+            price = st.text_input("Cena", placeholder="np. 2999 PLN")
+            features = st.text_area("Cechy (każda w nowej linii)", placeholder="Cecha 1\nCecha 2\nCecha 3")
+            rating = st.slider("Ocena", 1.0, 10.0, 7.0, 0.5)
+            opinions = st.text_area("Opinie użytkowników (opcjonalnie)", placeholder="Pozytywy\nNegatywy")
+            
+            if st.form_submit_button("➕ Dodaj produkt", use_container_width=True):
+                if name:
+                    product = {
+                        "nazwa": name,
+                        "cena": price if price else "Brak informacji",
+                        "cechy": [f.strip() for f in features.split('\n') if f.strip()],
+                        "ocena": rating,
+                        "opinie_uzytkownikow": [o.strip() for o in opinions.split('\n') if o.strip()] if opinions else [],
+                        "link": ""
+                    }
+                    st.session_state.products.append(product)
+                    st.success(f"✅ Dodano: {name}")
+                    st.rerun()
+                else:
+                    st.error("Nazwa produktu jest wymagana!")
+    
+    st.markdown("---")
+    st.subheader("📦 Wczytane produkty")
+    
+    if st.session_state.products:
+        for i, p in enumerate(st.session_state.products):
+            with st.expander(f"{i+1}. {p['nazwa']}", expanded=False):
+                st.write(f"**Cena:** {p.get('cena', 'N/A')}")
+                st.write(f"**Ocena:** {p.get('ocena', 'N/A')}/10")
+                if p.get('cechy'):
+                    st.write(f"**Cechy:** {len(p['cechy'])} pozycji")
+        
+        if st.button("🗑️ Wyczyść wszystko", use_container_width=True):
+            st.session_state.products = []
+            st.session_state.manual_ranking_order = []
+            st.rerun()
+    else:
+        st.info("Brak produktów. Dodaj je powyżej.")
+
+# --- GŁÓWNA TREŚĆ ---
 
 if not st.session_state.products:
-    st.info("👈 Zacznij od dodania produktów w panelu bocznym.")
+    st.info("👈 **Zacznij od dodania produktów** w panelu bocznym - wklej linki lub dodaj ręcznie.", icon="ℹ️")
 else:
-    st.header("Krok 2: Wygeneruj Treść")
+    st.header("⚙️ Krok 2: Wybierz typ treści")
+    
     content_type = st.selectbox(
-        "Wybierz typ treści do wygenerowania:",
-        ["Wybierz opcję...", "Zestawienie", "Porównanie", "Ranking"]
+        "Typ treści do wygenerowania:",
+        ["Wybierz opcję...", "🏆 Ranking", "⚖️ Porównanie"]
     )
-
-    if content_type == "Ranking":
-        st.subheader("Konfiguracja Rankingu")
-        all_product_names = [p['nazwa'] for p in st.session_state.products]
-        selected_products_names = st.multiselect(
-            "Wybierz produkty/usługi do rankingu:",
-            options=all_product_names,
-            default=all_product_names
+    
+    # --- PORÓWNANIE ---
+    if content_type == "⚖️ Porównanie":
+        st.subheader("⚖️ Porównanie Produktów")
+        
+        all_names = [p['nazwa'] for p in st.session_state.products]
+        selected = st.multiselect(
+            "Wybierz produkty do porównania (2-5):",
+            options=all_names,
+            default=all_names[:min(3, len(all_names))]
         )
-        selected_products_data = [p for p in st.session_state.products if p['nazwa'] in selected_products_names]
-
-        if not selected_products_data:
-            st.warning("Wybierz przynajmniej jeden produkt do rankingu.")
+        
+        if len(selected) < 2:
+            st.warning("Wybierz przynajmniej 2 produkty do porównania.")
+        elif len(selected) > 5:
+            st.warning("Zalecane jest porównanie max 5 produktów jednocześnie.")
         else:
+            selected_data = [p for p in st.session_state.products if p['nazwa'] in selected]
+            
+            st.markdown("### Podgląd wybranych produktów:")
+            cols = st.columns(len(selected_data))
+            for i, product in enumerate(selected_data):
+                with cols[i]:
+                    st.markdown(f"**{product['nazwa']}**")
+                    st.write(f"💰 {product.get('cena', 'N/A')}")
+                    st.write(f"⭐ {product.get('ocena', 'N/A')}/10")
+            
+            if st.button("🚀 Generuj Porównanie", type="primary", use_container_width=True):
+                prompt = generate_comparison_prompt(selected_data)
+                generate_llm_response(prompt)
+    
+    # --- RANKING ---
+    elif content_type == "🏆 Ranking":
+        st.subheader("🏆 Tworzenie Rankingu")
+        
+        all_names = [p['nazwa'] for p in st.session_state.products]
+        selected = st.multiselect(
+            "Wybierz produkty do rankingu:",
+            options=all_names,
+            default=all_names
+        )
+        
+        if not selected:
+            st.warning("Wybierz przynajmniej jeden produkt.")
+        else:
+            selected_data = [p for p in st.session_state.products if p['nazwa'] in selected]
+            
             ranking_mode = st.radio(
-                "Wybierz sposób tworzenia rankingu:",
-                ("Automatyczny (LLM decyduje o kolejności)", "Ręczny (sam ustalam kolejność)"),
+                "Tryb tworzenia rankingu:",
+                ("🤖 Automatyczny (AI decyduje)", "✋ Ręczny (ty ustalasz kolejność)"),
                 horizontal=True
             )
+            
+            # TRYB AUTOMATYCZNY
+            if ranking_mode == "🤖 Automatyczny (AI decyduje)":
+                col1, col2 = st.columns(2)
+                
+                with col1:
+                    criterion = st.selectbox(
+                        "Kryterium rankingu:",
+                        [
+                            "Najlepszy ogólnie",
+                            "Najlepszy stosunek jakości do ceny",
+                            "Najwyższa wydajność",
+                            "Najlepsza jakość wykonania",
+                            "Najbardziej innowacyjny",
+                            "Własne kryterium"
+                        ]
+                    )
+                    
+                    if criterion == "Własne kryterium":
+                        criterion = st.text_input("Wpisz swoje kryterium:", placeholder="np. Najlepszy dla graczy")
+                
+                with col2:
+                    top_n = st.slider(
+                        "Liczba pozycji w rankingu (Top N):",
+                        min_value=1,
+                        max_value=len(selected_data),
+                        value=min(5, len(selected_data))
+                    )
+                
+                if st.button("🚀 Generuj Ranking Automatyczny", type="primary", use_container_width=True):
+                    if criterion and criterion != "Własne kryterium":
+                        prompt = generate_ranking_prompt(selected_data, criterion, top_n)
+                        generate_llm_response(prompt)
+                    else:
+                        st.error("Proszę określić kryterium rankingu.")
+            
+            # TRYB RĘCZNY
+            else:
+                st.markdown("### 📝 Ustal kolejność w rankingu")
+                st.info("Użyj strzałek, aby zmienić kolejność produktów od najlepszego do najgorszego.")
+                
+                if st.session_state.manual_ranking_order != selected:
+                    st.session_state.manual_ranking_order = deepcopy(selected)
+                
+                for i, name in enumerate(st.session_state.manual_ranking_order):
+                    cols = st.columns([0.1, 0.7, 0.1, 0.1])
+                    with cols[0]:
+                        st.markdown(f"**#{i+1}**")
+                    with cols[1]:
+                        st.markdown(f"{name}")
+                    with cols[2]:
+                        if i > 0:
+                            st.button("▲", key=f"up_{name}", on_click=move_item_in_list,
+                                    args=(st.session_state.manual_ranking_order, name, 'up'))
+                    with cols[3]:
+                        if i < len(st.session_state.manual_ranking_order) - 1:
+                            st.button("▼", key=f"down_{name}", on_click=move_item_in_list,
+                                    args=(st.session_state.manual_ranking_order, name, 'down'))
+                
+                st.markdown("---")
+                
+                if st.button("🚀 Generuj Ranking Ręczny", type="primary", use_container_width=True):
+                    ordered_data = sorted(selected_data, 
+                                        key=lambda p: st.session_state.manual_ranking_order.index(p['nazwa']))
+                    
+                    prompt_parts = []
+                    for i, product in enumerate(ordered_data):
+                        prompt_parts.append(f"**Miejsce #{i+1}:**\n{json.dumps(product, indent=2, ensure_ascii=False)}")
+                    
+                    final_order = "\n\n".join(prompt_parts)
+                    
+                    prompt = f"""Jesteś redaktorem tworzącym profesjonalny ranking produktów.
 
-            if ranking_mode == "Automatyczny (LLM decyduje o kolejności)":
-                st.markdown("##### Opcje trybu automatycznego")
-                ranking_criterion = st.selectbox(
-                    "Ranking według kryterium:",
-                    ["Najlepszy ogólnie", "Najlepszy stosunek ceny do jakości", "Najwyższa wydajność", "Inne (wpisz własne)"]
-                )
-                if ranking_criterion == "Inne (wpisz własne)":
-                    ranking_criterion = st.text_input("Wpisz własne kryterium:")
-                top_n = st.slider(
-                    "Pokaż Top N:", min_value=1, max_value=len(selected_products_data), value=min(3, len(selected_products_data))
-                )
+Otrzymałeś ustaloną kolejność rankingu od eksperta. Twoim zadaniem jest napisać angażujący artykuł rankingowy, który uzasadni każde miejsce.
 
-                if st.button("🚀 Generuj Ranking Automatyczny"):
-                    prompt = f"""Jesteś redaktorem rankingu technologicznego. Twoim zadaniem jest stworzyć ranking 'Top {top_n}' na podstawie kryterium: '{ranking_criterion}'.
-Oto lista produktów do analizy wraz z ich danymi w formacie JSON:
-{json.dumps(selected_products_data, indent=2, ensure_ascii=False)}
-Przeanalizuj wszystkie produkty, posortuj je od najlepszego do najgorszego według podanego kryterium, a następnie napisz artykuł rankingowy. Dla każdej pozycji w rankingu (od #1 do #{top_n}) przedstaw produkt i napisz szczegółowe uzasadnienie, dlaczego zajął właśnie to miejsce, opierając się wyłącznie na dostarczonych danych."""
+USTALONY RANKING:
+{final_order}
+
+Dla każdej pozycji (od #1 do #{len(ordered_data)}):
+1. Przedstaw produkt
+2. Wyjaśnij jego kluczowe zalety
+3. Uzasadnij, dlaczego zasługuje na to konkretne miejsce
+4. Dodaj praktyczne wskazówki, dla kogo jest najlepszy
+
+Użyj formatowania Markdown dla lepszej czytelności. Napisz w sposób przekonujący i profesjonalny."""
+                    
                     generate_llm_response(prompt)
 
-            elif ranking_mode == "Ręczny (sam ustalam kolejność)":
-                st.markdown("##### Ustal kolejność w rankingu")
-                if st.session_state.manual_ranking_order != selected_products_names:
-                     st.session_state.manual_ranking_order = deepcopy(selected_products_names)
-                if not st.session_state.manual_ranking_order:
-                    st.warning("Brak produktów do ustalenia kolejności.")
-                else:
-                    for i, name in enumerate(st.session_state.manual_ranking_order):
-                        cols = st.columns([0.8, 0.1, 0.1])
-                        with cols[0]: st.markdown(f"### #{i+1}: {name}")
-                        with cols[1]: st.button("▲", key=f"up_{name}", on_click=move_item_in_list, args=(st.session_state.manual_ranking_order, name, 'up'))
-                        with cols[2]: st.button("▼", key=f"down_{name}", on_click=move_item_in_list, args=(st.session_state.manual_ranking_order, name, 'down'))
-                    
-                    if st.button("🚀 Generuj Ranking Ręczny"):
-                        ordered_products_data = sorted(selected_products_data, key=lambda p: st.session_state.manual_ranking_order.index(p['nazwa']))
-                        prompt_parts = []
-                        for i, product in enumerate(ordered_products_data):
-                            prompt_parts.append(f"Miejsce #{i+1}: {json.dumps(product, indent=2, ensure_ascii=False)}")
-                        final_order_str = "\n".join(prompt_parts)
-                        prompt = f"""Jesteś redaktorem tworzącym treść na stronę. Twoim zadaniem jest napisać artykuł rankingowy na podstawie przygotowanej przeze mnie kolejności. Musisz uzasadnić, dlaczego każdy z produktów zasłużył na swoje miejsce, bazując wyłącznie na dostarczonych danych.
-Oto ostateczna, ustalona kolejność rankingu oraz dane produktów:
-{final_order_str}
-Napisz angażujący artykuł. Dla każdej pozycji w rankingu przedstaw jej zalety i wyjaśnij, co czyni ją wyjątkową, tak aby czytelnik zrozumiał, dlaczego znalazła się na tym konkretnym miejscu."""
-                        generate_llm_response(prompt)
-    elif content_type in ["Zestawienie", "Porównanie"]:
-        st.info(f"Opcje dla '{content_type}' pojawią się tutaj. Można je zaimplementować w analogiczny sposób jak rankingi.")
+st.markdown("---")
+st.markdown("*Powered by OpenAI GPT-4 | Wersja 2.0*")
