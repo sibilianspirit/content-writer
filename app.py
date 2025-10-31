@@ -152,15 +152,18 @@ WAŻNE:
         
         result_text = response.choices[0].message.content.strip()
         
-        # Usuń markdown
+        # Usuń markdown formatting jeśli występuje
         if result_text.startswith("```
             result_text = result_text[7:]
-        if result_text.startswith("```"):
+        elif result_text.startswith("```"):
             result_text = result_text[3:]
+        
         if result_text.endswith("```
             result_text = result_text[:-3]
         
-        product_data = json.loads(result_text.strip())
+        result_text = result_text.strip()
+        
+        product_data = json.loads(result_text)
         return product_data
         
     except json.JSONDecodeError as e:
